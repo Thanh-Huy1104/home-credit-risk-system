@@ -1,0 +1,24 @@
+# configs/base.yaml
+project:
+  seed: 42
+
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  duckdb_path: "data/duckdb/home_credit.duckdb"
+  models_dir: "models/artifacts"
+  metrics_dir: "models/metrics"
+  reports_dir: "reports"
+  figures_dir: "reports/figures"
+
+dataset:
+  # Home Credit Default Risk dataset tables
+  tables:
+    application_train: "csv"
+    application_test: "csv"
+  label_col: "TARGET"
+
+split:
+  test_size: 0.20
+  val_size: 0.20
+  stratify: true
