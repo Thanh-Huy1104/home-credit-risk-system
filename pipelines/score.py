@@ -57,6 +57,9 @@ def score_batch(
 
     X = df.drop(columns=[c for c in drop_cols if c in df.columns])
 
+    for col in X.select_dtypes(include=["object", "str"]).columns:
+        X[col] = X[col].astype("category")
+
     manager.validate_features(X)
     X = X[metadata.features]
 
