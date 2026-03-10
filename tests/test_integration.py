@@ -124,12 +124,45 @@ def sample_raw_data(integration_config):
     )
     bureau_balance_df.to_csv(raw_dir / "bureau_balance.csv", index=False)
 
-    for name in [
-        "installments_payments",
-        "POS_CASH_balance",
-        "credit_card_balance",
-    ]:
-        pd.DataFrame({"SK_ID_CURR": []}).to_csv(raw_dir / f"{name}.csv", index=False)
+    installments_df = pd.DataFrame(
+        {
+            "SK_ID_CURR": [1, 1, 2],
+            "SK_ID_PREV": [301, 302, 303],
+            "NUM_INSTALMENT_NUMBER": [1, 2, 1],
+            "DAYS_INSTALMENT": [-30, -60, -30],
+            "DAYS_ENTRY_PAYMENT": [-28, -55, -30],
+            "AMT_INSTALMENT": [1000, 1000, 2000],
+            "AMT_PAYMENT": [1000, 900, 2000],
+        }
+    )
+    installments_df.to_csv(raw_dir / "installments_payments.csv", index=False)
+
+    pos_df = pd.DataFrame(
+        {
+            "SK_ID_CURR": [1, 1, 2],
+            "SK_ID_PREV": [401, 402, 403],
+            "NAME_CONTRACT_STATUS": ["Active", "Completed", "Active"],
+            "MONTHS_BALANCE": [-1, -2, -1],
+            "CNT_INSTALMENT": [12, 12, 24],
+            "CNT_INSTALMENT_FUTURE": [10, 0, 22],
+        }
+    )
+    pos_df.to_csv(raw_dir / "POS_CASH_balance.csv", index=False)
+
+    cc_df = pd.DataFrame(
+        {
+            "SK_ID_CURR": [1, 1, 2],
+            "SK_ID_PREV": [501, 502, 503],
+            "MONTHS_BALANCE": [-1, -2, -1],
+            "AMT_BALANCE": [5000, 3000, 10000],
+            "AMT_CREDIT_LIMIT_ACTUAL": [20000, 20000, 50000],
+            "AMT_DRAWINGS_ATM_CURRENT": [500, 300, 1000],
+            "AMT_PAYMENT_CURRENT": [200, 150, 500],
+            "CNT_INSTALMENT_MATURE_CUM": [10, 8, 20],
+            "SK_DPD": [0, 0, 30],
+        }
+    )
+    cc_df.to_csv(raw_dir / "credit_card_balance.csv", index=False)
 
     return raw_dir
 
