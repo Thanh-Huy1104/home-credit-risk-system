@@ -12,7 +12,6 @@ paths:
   figures_dir: "reports/figures"
 
 dataset:
-  # Home Credit Default Risk dataset tables
   tables:
     application_train: "csv"
     application_test: "csv"
@@ -22,3 +21,15 @@ split:
   test_size: 0.20
   val_size: 0.20
   stratify: true
+
+model:
+  n_estimators: 1000
+  learning_rate: 0.05
+  max_depth: 4
+  min_child_weight: 30
+  colsample_bytree: 0.8
+  subsample: 0.8
+  early_stopping_rounds: 50
+  tree_method: "hist"
+  enable_categorical: true
+  random_state: 42

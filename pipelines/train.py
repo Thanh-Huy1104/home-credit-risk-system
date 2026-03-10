@@ -1,161 +1,222 @@
+"""Model training pipeline."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
 
-# 1. Load the fully processed Parquet file
-print("Loading data...")
-df = pd.read_parquet("data/processed/application_features.parquet")
+from src.config import Config
+from src.models.manager import ModelManager
 
-df["TARGET"] = pd.to_numeric(df["TARGET"], errors="coerce")
-
-for col in df.select_dtypes(include=["object", "str"]).columns:
-    df[col] = df[col].astype("category")
-
-# 2. The Split: Separate Train and Test using your DuckDB flag
-print("Splitting data...")
-train_data = df[df["is_train"] == 1].copy()
-test_data = df[df["is_train"] == 0].copy()
-
-# Drop utility columns that aren't actual predictive features
-cols_to_drop = ["SK_ID_CURR", "TARGET", "is_train"]
-
-X = train_data.drop(columns=cols_to_drop)
-y = train_data["TARGET"].astype(int)  # Ensure it's explicitly an integer for XGBoost
-
-# The competition holdout set (what you will eventually predict on)
-X_competition = test_data.drop(columns=cols_to_drop)
-
-
-# 3. Create a local validation set to test our model before doing the final predictions
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-# 4. Handle the Imbalance (The 11.4 to 1 ratio your script found)
-# Formula: count(negative examples) / count(positive examples)
-imbalance_ratio = (y_train == 0).sum() / (y_train == 1).sum()
-
-# 5. Initialize and Train XGBoost
-print(f"\nTraining XGBoost with scale_pos_weight={imbalance_ratio:.2f}...")
-model = xgb.XGBClassifier(
-    n_estimators=1000,  # Max number of trees to build
-    learning_rate=0.05,
-    max_depth=4,
-    scale_pos_weight=imbalance_ratio,  # Forces the model to care about defaults
-    enable_categorical=True,  # Lets XGBoost process strings without One-Hot Encoding
-    eval_metric="auc",  # Optimize for Area Under the ROC Curve
-    early_stopping_rounds=50,  # Stop if the validation score doesn't improve for 50 rounds
-    tree_method="hist",  # Highly optimized algorithm for modern CPUs
-    n_jobs=-1,  # Max out all available CPU cores
-    min_child_weight=30,
-    colsample_bytree=0.8,
-    subsample=0.8,
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-
-# Train the model, watching the validation set to prevent overfitting
-model.fit(
-    X_train,
-    y_train,
-    eval_set=[(X_train, y_train), (X_val, y_val)],
-    verbose=50,  # Print an update every 50 trees
-)
-
-# 6. Score the model
-# We use [:, 1] to get the probability of a default (Class 1) rather than just a 0 or 1 prediction
-val_preds = model.predict_proba(X_val)[:, 1]
-auc_score = roc_auc_score(y_val, val_preds)
-
-print(f"\nFinal Validation ROC-AUC Score: {auc_score:.4f}")
+logger = logging.getLogger(__name__)
 
 
-print("\nGenerating Feature Importances...")
-# 7. Extract and Plot Feature Importances
-importance = model.feature_importances_
-features = X_train.columns
+def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare features for training.
 
-# Create a clean DataFrame
-fi_df = pd.DataFrame({"Feature": features, "Importance": importance})
-fi_df = fi_df.sort_values(by="Importance", ascending=False).head(20)
+    Args:
+        df: Raw feature DataFrame.
 
-# Generate the plot
-plt.figure(figsize=(12, 8))
-plt.barh(fi_df["Feature"][::-1], fi_df["Importance"][::-1], color="steelblue")
-plt.title("Top 20 Strongest Predictors of Default (XGBoost)")
-plt.xlabel("Relative Importance")
-plt.tight_layout()
+    Returns:
+        Prepared DataFrame with proper types.
+    """
+    df = df.copy()
 
-# Save it so you can open it on your Mac
-plt.savefig("feature_importances.png")
-print("Saved feature importance plot to feature_importances.png")
+    df["TARGET"] = pd.to_numeric(df["TARGET"], errors="coerce")
 
-print("\nGenerating final predictions on the blind test set...")
+    for col in df.select_dtypes(include=["object", "str"]).columns:
+        df[col] = df[col].astype("category")
 
-# 1. Predict probabilities for the test set
-# We use [:, 1] to grab the probability of class 1 (Default)
-test_preds = model.predict_proba(X_competition)[:, 1]
+    return df
 
-# 2. Create the submission dataframe
-# We need the SK_ID_CURR from the original test_data, and our new predictions
-submission = pd.DataFrame({"SK_ID_CURR": test_data["SK_ID_CURR"].astype(int), "TARGET": test_preds})
 
-# 3. Save to CSV
-output_file = "data/processed/submission.csv"
-submission.to_csv(output_file, index=False)
+def train_model(
+    df: pd.DataFrame,
+    config: Config,
+    output_dir: str,
+) -> dict[str, float]:
+    """Train XGBoost model for credit default prediction.
 
-print(f"Successfully saved {len(submission):,} predictions to {output_file}")
-print("Sample of final predictions:")
-print(submission.head())
+    Args:
+        df: Feature DataFrame.
+        config: Configuration object.
+        output_dir: Directory to save model artifacts.
 
-import shap
-import matplotlib.pyplot as plt
+    Returns:
+        Dictionary of evaluation metrics.
 
-print("\nGenerating SHAP explanations...")
+    Raises:
+        ValueError: If data is invalid.
+    """
+    logger.info("Preparing data...")
+    df = prepare_features(df)
 
-# 1. Initialize the SHAP Explainer
-# This algorithm reverse-engineers the XGBoost trees
-explainer = shap.TreeExplainer(model)
+    logger.info("Splitting data...")
+    train_data = df[df["is_train"] == 1].copy()
+    test_data = df[df["is_train"] == 0].copy()
 
-# 2. Find the most extreme cases in your test set
-high_risk_idx = test_preds.argmax()  # The person most likely to default
-low_risk_idx = test_preds.argmin()  # The person least likely to default
+    if len(train_data) == 0:
+        raise ValueError("No training data found")
+    if len(test_data) == 0:
+        logger.warning("No test data found")
 
-# Get the actual applicant IDs for our records
-high_risk_id = test_data.iloc[high_risk_idx]["SK_ID_CURR"]
-low_risk_id = test_data.iloc[low_risk_idx]["SK_ID_CURR"]
+    cols_to_drop = ["SK_ID_CURR", "TARGET", "is_train"]
 
-# 3. Extract their specific feature rows
-applicant_high = X_competition.iloc[[high_risk_idx]]
-applicant_low = X_competition.iloc[[low_risk_idx]]
+    X = train_data.drop(columns=cols_to_drop)
+    y = train_data["TARGET"].astype(int)
 
-# 4. Calculate the SHAP values
-shap_values_high = explainer(applicant_high)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X,
+        y,
+        test_size=config.split.val_size,
+        random_state=config.project.seed,
+        stratify=y if config.split.stratify else None,
+    )
 
-# 5. Generate and save a Waterfall Plot for the High-Risk applicant
-plt.figure(figsize=(12, 8))
-# We pass shap_values_high[0] because we are only explaining one person
-shap.plots.waterfall(shap_values_high[0], max_display=15, show=False)
-plt.title(f"Why is Applicant {high_risk_id} HIGH risk? (Prob: {test_preds[high_risk_idx]:.2%})")
-plt.tight_layout()
-plt.savefig("shap_high_risk.png", bbox_inches="tight")
-plt.show()
-plt.close()
+    n_negative = int((y_train == 0).sum())
+    n_positive = int((y_train == 1).sum())
+    imbalance_ratio = n_negative / n_positive if n_positive > 0 else 1.0
 
-print(f"Saved SHAP explanation for High-Risk Applicant {high_risk_id} to shap_high_risk.png")
+    logger.info(f"Training samples: {len(X_train):,}")
+    logger.info(f"Validation samples: {len(X_val):,}")
+    logger.info(f"Class imbalance ratio: {imbalance_ratio:.2f}")
 
-# Print SHAP values to console
-print("\n=== SHAP Values for High-Risk Applicant ===")
-print(f"Base value: {shap_values_high.base_values[0]:.4f}")
-print(f"Prediction: {shap_values_high.base_values[0] + shap_values_high.values[0].sum():.4f}")
-print("\nTop feature contributions:")
-shap_df = pd.DataFrame(
-    {
-        "Feature": X_competition.columns,
-        "Value": applicant_high.values[0],
-        "SHAP": shap_values_high.values[0],
+    logger.info("Training XGBoost...")
+    model = xgb.XGBClassifier(
+        n_estimators=config.model.n_estimators,
+        learning_rate=config.model.learning_rate,
+        max_depth=config.model.max_depth,
+        min_child_weight=config.model.min_child_weight,
+        colsample_bytree=config.model.colsample_bytree,
+        subsample=config.model.subsample,
+        scale_pos_weight=imbalance_ratio,
+        enable_categorical=config.model.enable_categorical,
+        eval_metric="auc",
+        early_stopping_rounds=config.model.early_stopping_rounds,
+        tree_method=config.model.tree_method,
+        n_jobs=-1,
+        random_state=config.model.random_state,
+    )
+
+    model.fit(
+        X_train,
+        y_train,
+        eval_set=[(X_train, y_train), (X_val, y_val)],
+        verbose=50,
+    )
+
+    logger.info("Evaluating model...")
+    val_preds = model.predict_proba(X_val)[:, 1]
+    auc_score = roc_auc_score(y_val, val_preds)
+
+    metrics = {
+        "roc_auc": float(auc_score),
+        "n_train": int(len(X_train)),
+        "n_val": int(len(X_val)),
+        "imbalance_ratio": float(imbalance_ratio),
+        "best_iteration": int(model.best_iteration),
     }
-)
-shap_df["Abs_SHAP"] = shap_df["SHAP"].abs()
-shap_df = shap_df.sort_values("Abs_SHAP", ascending=False).head(15)
-for _, row in shap_df.iterrows():
-    direction = "↑" if row["SHAP"] > 0 else "↓"
-    print(f"  {row['Feature']}: {row['Value']} → {row['SHAP']:+.4f} {direction}")
+
+    logger.info(f"Validation ROC-AUC: {auc_score:.4f}")
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    manager = ModelManager(output_dir)
+
+    params = {
+        "n_estimators": config.model.n_estimators,
+        "learning_rate": config.model.learning_rate,
+        "max_depth": config.model.max_depth,
+        "min_child_weight": config.model.min_child_weight,
+        "colsample_bytree": config.model.colsample_bytree,
+        "subsample": config.model.subsample,
+        "tree_method": config.model.tree_method,
+    }
+
+    manager.save(
+        model=model,
+        features=list(X.columns),
+        metrics=metrics,
+        params=params,
+        n_samples_train=len(X_train),
+    )
+
+    if len(test_data) > 0:
+        logger.info("Generating predictions for test set...")
+        X_test = test_data.drop(columns=cols_to_drop)
+        test_preds = model.predict_proba(X_test)[:, 1]
+
+        submission = pd.DataFrame(
+            {
+                "SK_ID_CURR": test_data["SK_ID_CURR"].astype(int),
+                "TARGET": test_preds,
+            }
+        )
+
+        submission_path = os.path.join(output_dir, "submission.csv")
+        submission.to_csv(submission_path, index=False)
+        logger.info(f"Saved predictions to {submission_path}")
+
+    return metrics
+
+
+def main() -> int:
+    """Main entry point for training pipeline."""
+    parser = argparse.ArgumentParser(description="Train credit risk model")
+    parser.add_argument("--config", required=True, help="Path to config file")
+    parser.add_argument("--features", default=None, help="Path to features parquet")
+    args = parser.parse_args()
+
+    try:
+        config = Config.from_yaml(args.config)
+
+        features_path = args.features
+        if features_path is None:
+            features_path = os.path.join(
+                config.paths.data_processed, "application_features.parquet"
+            )
+
+        logger.info(f"Loading features from {features_path}...")
+        df = pd.read_parquet(features_path)
+        logger.info(f"Loaded {len(df):,} rows")
+
+        metrics = train_model(
+            df=df,
+            config=config,
+            output_dir=config.paths.models_dir,
+        )
+
+        metrics_path = os.path.join(config.paths.metrics_dir, "train_metrics.json")
+        Path(config.paths.metrics_dir).mkdir(parents=True, exist_ok=True)
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+        logger.info(f"Saved metrics to {metrics_path}")
+
+        logger.info(f"Training complete: {metrics}")
+        return 0
+
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {e}")
+        return 1
+    except ValueError as e:
+        logger.error(f"Invalid data: {e}")
+        return 1
+    except Exception as e:
+        logger.exception(f"Training failed: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

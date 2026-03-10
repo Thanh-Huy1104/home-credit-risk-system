@@ -35,7 +35,7 @@ def main():
         GROUP BY is_train
         ORDER BY is_train DESC
     """).fetchall()
-    for is_train, dataset, count, pct in split:
+    for _is_train, dataset, count, pct in split:
         print(f"  {dataset:<8} {count:>10,} rows  ({pct:>5}%)")
 
     print("\n### TARGET DISTRIBUTION (TRAIN ONLY) ###")

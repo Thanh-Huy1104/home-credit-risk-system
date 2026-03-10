@@ -1,12 +1,5 @@
-# Makefile for fraud-risk-system
-# Usage:
-#   make setup
-#   make ingest
-#   make train
-#   make report
-#   make serve
-#   make test
-#   make clean
+# Makefile for home-credit-risk-system
+# Production-ready ML pipeline
 
 SHELL := /bin/bash
 
@@ -31,8 +24,6 @@ METRICS_DIR := $(MODELS_DIR)/metrics
 
 CONFIG_DIR := configs
 BASE_CONFIG := $(CONFIG_DIR)/base.yaml
-MODEL_CONFIG := $(CONFIG_DIR)/model_lgbm.yaml
-COST_CONFIG := $(CONFIG_DIR)/costs.yaml
 
 VENV := .venv
 VENV_BIN := $(VENV)/bin
@@ -40,19 +31,35 @@ PY := $(VENV_BIN)/python
 PYTEST := $(VENV_BIN)/pytest
 UVICORN := $(VENV_BIN)/uvicorn
 
-.PHONY: help setup venv dirs install fmt lint ingest train score report serve test clean
+.PHONY: help setup venv install fmt lint ingest aggregate train score serve test clean dirs
 
 help:
-	@echo "Targets:"
-	@echo "  make setup    - create venv + install deps + create dirs"
-	@echo "  make ingest   - run data ingest (raw -> duckdb/parquet)"
-	@echo "  make train    - train + evaluate models, save artifacts/metrics"
-	@echo "  make score    - batch scoring (later)"
-	@echo "  make report   - regenerate reports/figures (if separated)"
-	@echo "  make serve    - run FastAPI service locally"
-	@echo "  make test     - run tests"
-	@echo "  make clean    - remove caches and build artifacts"
+	@echo "Home Credit Risk System - Available Commands"
+	@echo ""
+	@echo "Setup:"
+	@echo "  make setup        - Create venv + install deps + create dirs"
+	@echo "  make install      - Install package in editable mode"
+	@echo ""
+	@echo "Pipeline:"
+	@echo "  make ingest       - Load raw CSV data into DuckDB/Parquet"
+	@echo "  make aggregate    - Create aggregated features"
+	@echo "  make train        - Train XGBoost model"
+	@echo "  make score        - Batch score new data"
+	@echo "  make pipeline     - Run full pipeline (ingest -> aggregate -> train)"
+	@echo ""
+	@echo "Serving:"
+	@echo "  make serve        - Start FastAPI server on port 8000"
+	@echo ""
+	@echo "Development:"
+	@echo "  make test         - Run test suite"
+	@echo "  make fmt          - Format code with ruff"
+	@echo "  make lint         - Lint code with ruff"
+	@echo "  make clean        - Remove caches and build artifacts"
+	@echo ""
+	@echo "Utilities:"
+	@echo "  make dirs         - Create directory structure"
 
+# Setup
 setup: venv install dirs
 
 venv:
@@ -65,10 +72,8 @@ venv:
 install:
 	@if [ -f "pyproject.toml" ]; then \
 		$(PY) -m pip install -e ".[dev]"; \
-	elif [ -f "requirements.txt" ]; then \
-		$(PY) -m pip install -r requirements.txt; \
 	else \
-		echo "No pyproject.toml or requirements.txt found."; \
+		echo "No pyproject.toml found."; \
 		exit 1; \
 	fi
 
@@ -78,37 +83,55 @@ dirs:
 	@mkdir -p $(ARTIFACTS_DIR) $(METRICS_DIR)
 	@mkdir -p $(CONFIG_DIR)
 	@mkdir -p tests
-	@echo "Created data/, reports/, models/, configs/, tests/ directories"
+	@echo "Created directory structure"
 
-# Optional: formatting/linting if you add tools (ruff/black)
-fmt:
-	@echo "Formatting (optional) ..."
-	@$(PY) -m ruff format . || true
-
-lint:
-	@echo "Linting (optional) ..."
-	@$(PY) -m ruff check . || true
-
-# Pipelines (these assume you have pipelines/ingest.py and pipelines/train.py)
+# Pipeline
 ingest:
 	@$(PY) -m $(PIPE_DIR).ingest --config $(BASE_CONFIG)
 
+aggregate:
+	@$(PY) -m $(PIPE_DIR).aggregate --config $(BASE_CONFIG)
+
 train:
-	@$(PY) -m $(PIPE_DIR).train --config $(BASE_CONFIG) --model-config $(MODEL_CONFIG) --cost-config $(COST_CONFIG)
+	@$(PY) -m $(PIPE_DIR).train --config $(BASE_CONFIG)
 
 score:
-	@$(PY) -m $(PIPE_DIR).score_batch --config $(BASE_CONFIG) --model-config $(MODEL_CONFIG)
+	@$(PY) -m $(PIPE_DIR).score --config $(BASE_CONFIG)
 
-report:
-	@$(PY) -m $(PIPE_DIR).report --config $(BASE_CONFIG)
+pipeline: ingest aggregate train
 
+# Serving
 serve:
-	@$(UVICORN) $(PROJECT).serving.app:app --host 0.0.0.0 --port 8000 --reload
+	@$(UVICORN) src.serving.app:app --host 0.0.0.0 --port 8000 --reload
 
+# Development
 test:
-	@$(PYTEST) -q
+	@$(PYTEST) tests/ -v --tb=short
 
+test-cov:
+	@$(PYTEST) tests/ -v --cov=src --cov-report=term-missing
+
+fmt:
+	@$(PY) -m ruff format .
+
+lint:
+	@$(PY) -m ruff check . --fix
+
+# Cleanup
 clean:
-	@rm -rf .pytest_cache .ruff_cache .mypy_cache
-	@find . -type d -name "__pycache__" -exec rm -rf {} +
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage htmlcov
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Cleaned caches"
+
+clean-data:
+	@rm -rf $(PROCESSED_DIR)/*.parquet
+	@rm -rf $(DUCKDB_DIR)/*.duckdb
+	@rm -rf $(DUCKDB_DIR)/*.wal
+	@echo "Cleaned processed data"
+
+clean-models:
+	@rm -rf $(ARTIFACTS_DIR)/*.joblib
+	@rm -rf $(ARTIFACTS_DIR)/*.json
+	@rm -rf $(METRICS_DIR)/*.json
+	@echo "Cleaned model artifacts"
